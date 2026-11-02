@@ -1,0 +1,520 @@
+name: Build Voice Home APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Write project files
+        run: |
+          mkdir -p proj/app/src/main/java/com/voicehome
+          cd proj
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VoiceHome"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.voicehome'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.voicehome'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.READ_CONTACTS" />
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <package android:name="com.google.android.gm" />
+                  <package android:name="com.whatsapp" />
+                  <package android:name="com.whatsapp.w4b" />
+                  <package android:name="com.instagram.android" />
+                  <package android:name="com.google.android.youtube" />
+              </queries>
+
+              <application
+                  android:label="Voice Home"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/voicehome/MainActivity.kt <<'EOF'
+          package com.voicehome
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.ActivityNotFoundException
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.AlarmClock
+          import android.provider.CalendarContract
+          import android.provider.ContactsContract
+          import android.speech.RecognizerIntent
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.BaseAdapter
+          import android.widget.Button
+          import android.widget.GridView
+          import android.widget.LinearLayout
+          import android.widget.TextClock
+          import android.widget.TextView
+          import java.util.Locale
+
+          class AppInfo(val label: String, val pkg: String, val icon: Drawable)
+
+          class MainActivity : Activity() {
+
+              // Country code added to 10-digit numbers for WhatsApp (91 = India)
+              private val defaultCC = "91"
+              private var apps: List<AppInfo> = emptyList()
+              private var heard = ""
+              private lateinit var status: TextView
+              private lateinit var grid: GridView
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(Color.parseColor("#0B0F1A"))
+                  root.setPadding(dp(16), dp(48), dp(16), dp(16))
+
+                  val time = TextClock(this)
+                  time.format12Hour = "hh:mm"
+                  time.format24Hour = "HH:mm"
+                  time.textSize = 60f
+                  time.setTextColor(Color.WHITE)
+                  root.addView(time)
+
+                  val date = TextClock(this)
+                  date.format12Hour = "EEEE, d MMMM"
+                  date.format24Hour = "EEEE, d MMMM"
+                  date.textSize = 18f
+                  date.setTextColor(Color.parseColor("#D1D5DB"))
+                  root.addView(date)
+
+                  status = TextView(this)
+                  status.text = "Tap the mic and speak a command"
+                  status.textSize = 16f
+                  status.setTextColor(Color.parseColor("#9CA3AF"))
+                  status.setPadding(0, dp(16), 0, dp(16))
+                  root.addView(status)
+
+                  val bg = GradientDrawable()
+                  bg.cornerRadius = dp(32).toFloat()
+                  bg.setColor(Color.parseColor("#3B82F6"))
+                  val mic = Button(this)
+                  mic.text = "Tap & speak"
+                  mic.textSize = 20f
+                  mic.isAllCaps = false
+                  mic.setTextColor(Color.WHITE)
+                  mic.background = bg
+                  mic.setOnClickListener { listen() }
+                  val micLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64))
+                  micLp.bottomMargin = dp(16)
+                  root.addView(mic, micLp)
+
+                  grid = GridView(this)
+                  grid.numColumns = 4
+                  grid.verticalSpacing = dp(14)
+                  grid.adapter = object : BaseAdapter() {
+                      override fun getCount(): Int = apps.size
+                      override fun getItem(p: Int): Any = apps[p]
+                      override fun getItemId(p: Int): Long = p.toLong()
+                      override fun getView(p: Int, v: View?, parent: ViewGroup?): View {
+                          val tv: TextView
+                          if (v is TextView) {
+                              tv = v
+                          } else {
+                              tv = TextView(this@MainActivity)
+                              tv.gravity = Gravity.CENTER
+                              tv.textSize = 11f
+                              tv.setTextColor(Color.WHITE)
+                              tv.maxLines = 1
+                              tv.ellipsize = TextUtils.TruncateAt.END
+                              tv.compoundDrawablePadding = dp(4)
+                          }
+                          val a = apps[p]
+                          a.icon.setBounds(0, 0, dp(48), dp(48))
+                          tv.setCompoundDrawables(null, a.icon, null, null)
+                          tv.text = a.label
+                          return tv
+                      }
+                  }
+                  grid.setOnItemClickListener { _, _, pos, _ -> launchPkg(apps[pos].pkg) }
+                  root.addView(grid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+                  setContentView(root)
+
+                  val need = arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE)
+                      .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                  if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  apps = loadApps()
+                  (grid.adapter as BaseAdapter).notifyDataSetChanged()
+              }
+
+              override fun onBackPressed() {
+                  // Home screen: do nothing
+              }
+
+              private fun loadApps(): List<AppInfo> {
+                  val i = Intent(Intent.ACTION_MAIN)
+                  i.addCategory(Intent.CATEGORY_LAUNCHER)
+                  val pm = packageManager
+                  return pm.queryIntentActivities(i, 0)
+                      .filter { it.activityInfo.packageName != packageName }
+                      .map { AppInfo(it.loadLabel(pm).toString(), it.activityInfo.packageName, it.loadIcon(pm)) }
+                      .sortedBy { it.label.lowercase() }
+              }
+
+              // ---------- Voice input ----------
+
+              private fun listen() {
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                  i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Say a command")
+                  try {
+                      startActivityForResult(i, 100)
+                  } catch (e: Exception) {
+                      status.text = "Voice input not available. Make sure the Google app is installed."
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 100 && resultCode == RESULT_OK) {
+                      val text = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+                      if (text != null) handle(text)
+                  }
+              }
+
+              private fun say(m: String) {
+                  status.text = "Heard: \"$heard\"\n-> $m"
+              }
+
+              // ---------- Command routing ----------
+
+              private fun handle(raw: String) {
+                  heard = raw
+                  val t = raw.lowercase(Locale.ROOT).trim()
+                  status.text = "Heard: \"$raw\""
+                  try {
+                      when {
+                          "whatsapp" in t || "whats app" in t -> whatsapp(t)
+                          "timer" in t -> setTimer(t)
+                          "alarm" in t || "wake me" in t -> setAlarm(t)
+                          t.startsWith("call ") || t.startsWith("dial ") || t.startsWith("phone ") ->
+                              callPerson(t.substringAfter(" ").removePrefix("to "))
+                          "youtube" in t || t.startsWith("play ") -> youtube(t)
+                          listOf("calendar", "meeting", "event", "appointment", "schedule").any { it in t } -> calendar(t)
+                          "mail" in t || "inbox" in t -> {
+                              if (launchPkg("com.google.android.gm")) say("Opening Gmail") else say("Gmail is not installed")
+                          }
+                          "instagram" in t -> {
+                              if (launchPkg("com.instagram.android")) say("Opening Instagram") else say("Instagram is not installed")
+                          }
+                          t.startsWith("open ") || t.startsWith("launch ") || t.startsWith("start ") -> openApp(t)
+                          else -> {
+                              say("Searching Google")
+                              startActivity(Intent(Intent.ACTION_WEB_SEARCH).putExtra("query", raw))
+                          }
+                      }
+                  } catch (e: Exception) {
+                      say("Couldn't do that: ${e.message}")
+                  }
+              }
+
+              // ---------- Helpers ----------
+
+              private fun launchPkg(p: String): Boolean {
+                  val i = packageManager.getLaunchIntentForPackage(p) ?: return false
+                  startActivity(i)
+                  return true
+              }
+
+              private fun viewUri(uri: String, vararg pkgs: String?) {
+                  val i = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+                  for (p in pkgs) {
+                      try {
+                          i.setPackage(p)
+                          startActivity(i)
+                          return
+                      } catch (e: ActivityNotFoundException) {
+                      }
+                  }
+                  say("Couldn't open that")
+              }
+
+              private fun findNumber(name: String): String? {
+                  if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+                  val c = contentResolver.query(
+                      ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                      arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                      ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
+                      arrayOf("%" + name + "%"),
+                      null
+                  )
+                  c?.use {
+                      if (it.moveToFirst()) return it.getString(0)
+                  }
+                  return null
+              }
+
+              private fun waNumber(n: String): String {
+                  var d = n.filter { it.isDigit() }
+                  if (d.startsWith("00")) d = d.substring(2)
+                  else if (d.length == 11 && d.startsWith("0")) d = defaultCC + d.substring(1)
+                  else if (d.length == 10) d = defaultCC + d
+                  return d
+              }
+
+              // ---------- Actions ----------
+
+              private fun callPerson(nameRaw: String) {
+                  val name = nameRaw.trim()
+                  val number: String? =
+                      if (name.count { it.isDigit() } >= 6) name.filter { it.isDigit() || it == '+' }
+                      else findNumber(name)
+                  if (number == null) {
+                      say("Couldn't find \"$name\" in contacts (check Contacts permission)")
+                      return
+                  }
+                  val granted = checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+                  val action = if (granted) Intent.ACTION_CALL else Intent.ACTION_DIAL
+                  startActivity(Intent(action, Uri.parse("tel:" + Uri.encode(number))))
+                  say("Calling $name")
+              }
+
+              private fun whatsapp(t: String) {
+                  val sep = Regex("\\s(saying|say|that|tell him|tell her)\\s")
+                  val m = sep.find(t)
+                  val head = if (m != null) t.substring(0, m.range.first) else t
+                  var msg: String? = null
+                  if (m != null) {
+                      val rest = t.substring(m.range.last + 1).trim()
+                      if (rest.isNotBlank()) msg = rest.replaceFirstChar { it.uppercase() }
+                  }
+                  val stop = setOf("whatsapp", "whats", "app", "on", "via", "send", "a", "an", "message",
+                      "msg", "text", "to", "please", "open", "chat", "with", "the")
+                  val name = head.split(Regex("\\s+")).filter { it.isNotBlank() && it !in stop }.joinToString(" ")
+                  if (name.isBlank()) {
+                      if (launchPkg("com.whatsapp") || launchPkg("com.whatsapp.w4b")) say("Opening WhatsApp")
+                      else say("WhatsApp is not installed")
+                      return
+                  }
+                  val rawNum: String? =
+                      if (name.count { it.isDigit() } >= 6) name else findNumber(name)
+                  if (rawNum == null) {
+                      say("Couldn't find \"$name\" in contacts (check Contacts permission)")
+                      return
+                  }
+                  var url = "https://wa.me/" + waNumber(rawNum)
+                  if (msg != null) url += "?text=" + Uri.encode(msg)
+                  viewUri(url, "com.whatsapp", "com.whatsapp.w4b", null)
+                  say(if (msg != null) "WhatsApp to $name ready - tap Send" else "Opening WhatsApp chat with $name")
+              }
+
+              private fun youtube(t: String) {
+                  var q = t.replace("on youtube", "").replace("youtube", "").trim()
+                  q = q.replace(Regex("^(play|search for|search|open|watch)\\s*"), "").trim()
+                  if (q.isEmpty()) {
+                      if (launchPkg("com.google.android.youtube")) say("Opening YouTube") else say("YouTube is not installed")
+                      return
+                  }
+                  viewUri("https://www.youtube.com/results?search_query=" + Uri.encode(q), "com.google.android.youtube", null)
+                  say("YouTube: $q")
+              }
+
+              private fun setAlarm(t: String) {
+                  val m = Regex("(\\d{1,2})(?:[:.\\s](\\d{2}))?\\s*(a\\.?\\s?m\\.?|p\\.?\\s?m\\.?)?").find(t)
+                  if (m == null) {
+                      say("Say a time, e.g. 'set alarm for 6:30 am'")
+                      return
+                  }
+                  var h = m.groupValues[1].toInt()
+                  val min = m.groupValues[2].ifEmpty { "0" }.toInt()
+                  val ap = m.groupValues[3]
+                  if (ap.startsWith("p") && h < 12) h += 12
+                  if (ap.startsWith("a") && h == 12) h = 0
+                  if (h > 23 || min > 59) {
+                      say("Couldn't understand that time")
+                      return
+                  }
+                  val i = Intent(AlarmClock.ACTION_SET_ALARM)
+                  i.putExtra(AlarmClock.EXTRA_HOUR, h)
+                  i.putExtra(AlarmClock.EXTRA_MINUTES, min)
+                  i.putExtra(AlarmClock.EXTRA_MESSAGE, "Voice Home")
+                  i.putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                  startActivity(i)
+                  say("Alarm set for " + "%02d:%02d".format(h, min))
+              }
+
+              private fun setTimer(t: String) {
+                  val m = Regex("(\\d+)\\s*(hour|hr|minute|min|second|sec)").find(t)
+                  if (m == null) {
+                      say("Say e.g. 'timer for 10 minutes'")
+                      return
+                  }
+                  val n = m.groupValues[1].toInt()
+                  val secs = when (m.groupValues[2]) {
+                      "hour", "hr" -> n * 3600
+                      "minute", "min" -> n * 60
+                      else -> n
+                  }
+                  val i = Intent(AlarmClock.ACTION_SET_TIMER)
+                  i.putExtra(AlarmClock.EXTRA_LENGTH, secs)
+                  i.putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                  startActivity(i)
+                  say("Timer started: " + m.value)
+              }
+
+              private fun calendar(t: String) {
+                  val verbs = Regex("^(add|create|schedule|set up|new|make)\\s+(a |an |the )?")
+                  if (verbs.containsMatchIn(t)) {
+                      var title = t.replace(verbs, "").trim()
+                      if (title.isEmpty()) title = "New event"
+                      title = title.replaceFirstChar { it.uppercase() }
+                      val i = Intent(Intent.ACTION_INSERT)
+                      i.data = CalendarContract.Events.CONTENT_URI
+                      i.putExtra(CalendarContract.Events.TITLE, title)
+                      startActivity(i)
+                      say("New event: $title - tap Save")
+                  } else {
+                      try {
+                          startActivity(Intent(Intent.ACTION_VIEW,
+                              Uri.parse("content://com.android.calendar/time/" + System.currentTimeMillis())))
+                          say("Opening calendar")
+                      } catch (e: ActivityNotFoundException) {
+                          if (!launchPkg("com.google.android.calendar")) say("No calendar app found")
+                      }
+                  }
+              }
+
+              private fun openApp(t: String) {
+                  val name = t.replace(Regex("^(open|launch|start)\\s+"), "").replace(Regex("\\s+app$"), "").trim()
+                  if (name.isBlank()) {
+                      say("Which app?")
+                      return
+                  }
+                  val app = apps.firstOrNull { it.label.lowercase() == name }
+                      ?: apps.firstOrNull { it.label.lowercase().contains(name) }
+                  if (app == null) {
+                      say("No app named \"$name\"")
+                  } else {
+                      launchPkg(app.pkg)
+                      say("Opening " + app.label)
+                  }
+              }
+          }
+          EOF
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp proj/app/build/outputs/apk/debug/app-debug.apk VoiceHome.apk
+          gh release create "v${{ github.run_number }}" VoiceHome.apk --repo "${{ github.repository }}" --title "Voice Home build ${{ github.run_number }}" --notes "Download VoiceHome.apk and install it."
